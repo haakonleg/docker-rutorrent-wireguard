@@ -1,0 +1,43 @@
+#!/usr/bin/with-contenv bash
+_term() {
+    s6-echo "Wireguard stopping..."
+    set -x
+    wg-quick down $WG_SERVER
+    iptables -D OUTPUT ! -o $WG_SERVER -m mark ! --mark $(wg show $WG_SERVER fwmark) -m addrtype ! --dst-type LOCAL -j REJECT
+    iptables -D OUTPUT -o eth0 -p tcp --sport 80 -j ACCEPT
+    { set +x; } 2>/dev/null
+}
+trap _term SIGINT SIGTERM
+
+s6-echo "**** STARTING WIREGUARD ****"
+set -x
+wg-quick up $WG_SERVER
+
+# Kill switch, but allow outgoing traffic for web server
+iptables -I OUTPUT ! -o $WG_SERVER -m mark ! --mark $(wg show $WG_SERVER fwmark) -m addrtype ! --dst-type LOCAL -j REJECT
+iptables -I OUTPUT -o eth0 -p tcp --sport 80 -j ACCEPT
+{ set +x; } 2>/dev/null
+
+s6-echo "Connected to $WG_SERVER"
+
+poll_vpn() {
+    s6-echo "**** VPN HEALTH CHECK $(date '+%d.%m %H:%M:%S') ****"
+    CURL_RES=$(curl --silent https://ifconfig.me -w ", %{http_code}")
+    ip=$(echo $CURL_RES | awk -F ", " '{print $1}')
+    http_status=$(echo $CURL_RES | awk -F ", " '{print $2}')
+    s6-echo "Wireguard IP is $ip"
+    s6-echo "Curl returned status code $http_status"
+
+    if [[ $http_status -eq 200 ]]; then
+        echo "VPN IS UP!"
+        return 0;
+    else
+        echo "VPN IS DOWN!"
+        return 1;
+    fi
+}
+
+while poll_vpn; do sleep 120; done
+_term
+
+exit 1
